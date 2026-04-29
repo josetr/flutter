@@ -15,11 +15,13 @@ namespace flutter {
 namespace {
 
 static fml::TimeDelta GetFrameInterval() {
+  static const fml::TimeDelta frame_interval = [] {
   constexpr double kDefaultRefreshRate = 60.0;
   constexpr double kMinRefreshRate = 1.0;
   constexpr double kMaxRefreshRate = 1000.0;
 
   double refresh_rate = kDefaultRefreshRate;
+  const char* source = "default";
   const char* refresh_rate_value =
       std::getenv("FLUTTER_ENGINE_FALLBACK_VSYNC_HZ");
   if (refresh_rate_value != nullptr && refresh_rate_value[0] != '\0') {
@@ -28,13 +30,20 @@ static fml::TimeDelta GetFrameInterval() {
     if (end != refresh_rate_value && parsed_refresh_rate >= kMinRefreshRate &&
         parsed_refresh_rate <= kMaxRefreshRate) {
       refresh_rate = parsed_refresh_rate;
+      source = "FLUTTER_ENGINE_FALLBACK_VSYNC_HZ";
     } else {
       FML_LOG(WARNING) << "Ignoring invalid FLUTTER_ENGINE_FALLBACK_VSYNC_HZ="
                        << refresh_rate_value;
     }
   }
 
-  return fml::TimeDelta::FromSecondsF(1.0 / refresh_rate);
+  fml::TimeDelta interval = fml::TimeDelta::FromSecondsF(1.0 / refresh_rate);
+  FML_LOG(INFO) << "VsyncWaiterFallback using timer-based vsync at "
+                << refresh_rate << " Hz from " << source << " ("
+                << interval.ToMicroseconds() << " us frame interval).";
+  return interval;
+  }();
+  return frame_interval;
 }
 
 static fml::TimePoint SnapToNextTick(fml::TimePoint value,
