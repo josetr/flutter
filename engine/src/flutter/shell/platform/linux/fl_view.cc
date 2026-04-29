@@ -536,7 +536,6 @@ static void setup_vulkan(FlView* self) {
                                             content_y);
 
   fl_engine_set_vulkan_manager(self->engine, vulkan_manager);
-  fl_engine_setup_xpresent_vsync(self->engine, window);
   g_object_unref(vulkan_manager);
 }
 

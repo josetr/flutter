@@ -4,15 +4,9 @@
 
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
 
-#include <X11/Xlib.h>
-#include <X11/extensions/presenttokens.h>
-#include <dlfcn.h>
 #include <epoxy/egl.h>
-#include <gdk/gdkx.h>
 #include <gmodule.h>
 
-#include <algorithm>
-#include <cstdio>
 #include <cstring>
 
 #include "flutter/common/constants.h"
@@ -42,28 +36,6 @@ static constexpr size_t kPlatformTaskRunnerIdentifier = 1;
 // differentiate the actual device (mouse v.s. trackpad)
 static constexpr int32_t kMousePointerDeviceId = 0;
 static constexpr int32_t kPointerPanZoomDeviceId = 1;
-
-struct XPresentCompleteNotifyEvent {
-  int type;
-  unsigned long serial;
-  int send_event;
-  Display* display;
-  int extension;
-  int evtype;
-  uint32_t eid;
-  Window window;
-  uint32_t serial_number;
-  uint64_t ust;
-  uint64_t msc;
-  uint8_t kind;
-  uint8_t mode;
-};
-
-using XPresentQueryExtensionFn = int (*)(Display*, int*, int*);
-using XPresentSelectInputFn = XID (*)(Display*, Window, unsigned int);
-using XPresentFreeInputFn = void (*)(Display*, Window, XID);
-using XPresentNotifyMSCFn =
-    void (*)(Display*, Window, uint32_t, uint64_t, uint64_t, uint64_t);
 
 struct _FlEngine {
   GObject parent_instance;
@@ -131,24 +103,6 @@ struct _FlEngine {
 
   // Objects rendering the views.
   GHashTable* renderables_by_view_id;
-
-  // Experimental X Present based vsync support for X11.
-  gboolean xpresent_vsync_enabled;
-  void* xpresent_library;
-  XPresentSelectInputFn xpresent_select_input;
-  XPresentFreeInputFn xpresent_free_input;
-  XPresentNotifyMSCFn xpresent_notify_msc;
-  GdkWindow* xpresent_gdk_window;
-  Display* xpresent_display;
-  Window xpresent_window;
-  XID xpresent_event_id;
-  int xpresent_event_base;
-  uint32_t xpresent_serial;
-  intptr_t xpresent_pending_baton;
-  gboolean xpresent_has_pending_baton;
-  gboolean xpresent_logged_completion;
-  guint xpresent_timeout_source;
-  uint64_t xpresent_frame_interval_nanos;
 
   // Function to call when a platform message is received.
   FlEnginePlatformMessageHandler platform_message_handler;
@@ -541,10 +495,6 @@ static void fl_engine_update_semantics_cb(const FlutterSemanticsUpdate2* update,
   g_signal_emit(self, fl_engine_signals[SIGNAL_UPDATE_SEMANTICS], 0, update);
 }
 
-static GdkFilterReturn fl_engine_xpresent_event_filter(GdkXEvent* xevent,
-                                                       GdkEvent* event,
-                                                       gpointer user_data);
-
 static void setup_keyboard(FlEngine* self) {
   g_clear_object(&self->keyboard_manager);
   self->keyboard_manager = fl_keyboard_manager_new(self);
@@ -620,27 +570,6 @@ static void fl_engine_set_property(GObject* object,
 
 static void fl_engine_dispose(GObject* object) {
   FlEngine* self = FL_ENGINE(object);
-
-  if (self->xpresent_timeout_source != 0) {
-    g_source_remove(self->xpresent_timeout_source);
-    self->xpresent_timeout_source = 0;
-  }
-  if (self->xpresent_gdk_window != nullptr) {
-    gdk_window_remove_filter(self->xpresent_gdk_window,
-                             fl_engine_xpresent_event_filter, self);
-    g_clear_object(&self->xpresent_gdk_window);
-  }
-  if (self->xpresent_vsync_enabled && self->xpresent_display != nullptr &&
-      self->xpresent_window != 0 && self->xpresent_event_id != 0 &&
-      self->xpresent_free_input != nullptr) {
-    self->xpresent_free_input(self->xpresent_display, self->xpresent_window,
-                              self->xpresent_event_id);
-  }
-  self->xpresent_vsync_enabled = FALSE;
-  if (self->xpresent_library != nullptr) {
-    dlclose(self->xpresent_library);
-    self->xpresent_library = nullptr;
-  }
 
   if (self->engine != nullptr) {
     if (self->embedder_api.Shutdown(self->engine) != kSuccess) {
@@ -818,181 +747,6 @@ void fl_engine_set_vulkan_manager(FlEngine* self, FlVulkanManager* manager) {
   g_set_object(&self->vulkan_manager, manager);
 }
 
-static void xpresent_log(const char* message) {
-  if (FILE* log_file =
-          std::fopen("/home/jose/flutter-pr/xpresent_vsync.log", "a")) {
-    std::fprintf(log_file, "%s\n", message);
-    std::fclose(log_file);
-  }
-}
-
-static uint64_t get_frame_interval_nanos_for_window(GdkWindow* window) {
-  constexpr uint64_t kDefaultFrameIntervalNanos = 16666666;
-  if (window == nullptr) {
-    return kDefaultFrameIntervalNanos;
-  }
-
-  GdkDisplay* display = gdk_window_get_display(window);
-  GdkMonitor* monitor = gdk_display_get_monitor_at_window(display, window);
-  if (monitor == nullptr) {
-    return kDefaultFrameIntervalNanos;
-  }
-
-  int refresh_rate_millihz = gdk_monitor_get_refresh_rate(monitor);
-  if (refresh_rate_millihz <= 0) {
-    return kDefaultFrameIntervalNanos;
-  }
-
-  return static_cast<uint64_t>(1000000000000.0 /
-                               static_cast<double>(refresh_rate_millihz));
-}
-
-static void fl_engine_xpresent_complete_vsync(FlEngine* self,
-                                              uint64_t frame_start_time_nanos) {
-  if (!self->xpresent_has_pending_baton || self->engine == nullptr) {
-    return;
-  }
-
-  intptr_t baton = self->xpresent_pending_baton;
-  self->xpresent_pending_baton = 0;
-  self->xpresent_has_pending_baton = FALSE;
-
-  if (self->xpresent_timeout_source != 0) {
-    g_source_remove(self->xpresent_timeout_source);
-    self->xpresent_timeout_source = 0;
-  }
-
-  uint64_t frame_target_time_nanos =
-      frame_start_time_nanos + self->xpresent_frame_interval_nanos;
-  self->embedder_api.OnVsync(self->engine, baton, frame_start_time_nanos,
-                             frame_target_time_nanos);
-}
-
-static gboolean fl_engine_xpresent_timeout_cb(gpointer user_data) {
-  FlEngine* self = FL_ENGINE(user_data);
-  self->xpresent_timeout_source = 0;
-
-  uint64_t now = self->embedder_api.GetCurrentTime();
-  xpresent_log("XPresent timeout; falling back to current-time vsync.");
-  fl_engine_xpresent_complete_vsync(self, now);
-  return G_SOURCE_REMOVE;
-}
-
-static GdkFilterReturn fl_engine_xpresent_event_filter(GdkXEvent* xevent,
-                                                       GdkEvent* event,
-                                                       gpointer user_data) {
-  FlEngine* self = FL_ENGINE(user_data);
-  XEvent* x_event = static_cast<XEvent*>(xevent);
-  if (!self->xpresent_vsync_enabled || x_event->type != GenericEvent) {
-    return GDK_FILTER_CONTINUE;
-  }
-
-  XGenericEventCookie* cookie = &x_event->xcookie;
-  if (cookie->extension != self->xpresent_event_base ||
-      cookie->evtype != PresentCompleteNotify) {
-    return GDK_FILTER_CONTINUE;
-  }
-
-  if (!XGetEventData(self->xpresent_display, cookie)) {
-    return GDK_FILTER_CONTINUE;
-  }
-
-  auto* present_event = static_cast<XPresentCompleteNotifyEvent*>(cookie->data);
-  if (present_event != nullptr &&
-      present_event->kind == PresentCompleteKindNotifyMSC &&
-      self->xpresent_has_pending_baton &&
-      present_event->serial_number == self->xpresent_serial) {
-    if (!self->xpresent_logged_completion) {
-      xpresent_log("XPresent complete notify received.");
-      self->xpresent_logged_completion = TRUE;
-    }
-    uint64_t frame_start_time_nanos = present_event->ust > 0
-                                          ? present_event->ust * 1000
-                                          : self->embedder_api.GetCurrentTime();
-    fl_engine_xpresent_complete_vsync(self, frame_start_time_nanos);
-    XFreeEventData(self->xpresent_display, cookie);
-    return GDK_FILTER_REMOVE;
-  }
-
-  XFreeEventData(self->xpresent_display, cookie);
-  return GDK_FILTER_CONTINUE;
-}
-
-static void fl_engine_xpresent_vsync_callback(void* user_data, intptr_t baton) {
-  FlEngine* self = FL_ENGINE(user_data);
-  if (!self->xpresent_vsync_enabled || self->xpresent_notify_msc == nullptr) {
-    return;
-  }
-
-  if (self->xpresent_has_pending_baton) {
-    xpresent_log("XPresent received a new baton while one was pending.");
-    fl_engine_xpresent_complete_vsync(self,
-                                      self->embedder_api.GetCurrentTime());
-  }
-
-  self->xpresent_pending_baton = baton;
-  self->xpresent_has_pending_baton = TRUE;
-  self->xpresent_serial++;
-
-  self->xpresent_notify_msc(self->xpresent_display, self->xpresent_window,
-                            self->xpresent_serial, 0, 0, 0);
-  XFlush(self->xpresent_display);
-
-  guint timeout_ms = static_cast<guint>(std::max<uint64_t>(
-      100, (self->xpresent_frame_interval_nanos * 4) / 1000000));
-  self->xpresent_timeout_source =
-      g_timeout_add(timeout_ms, fl_engine_xpresent_timeout_cb, self);
-}
-
-void fl_engine_setup_xpresent_vsync(FlEngine* self, GdkWindow* window) {
-  g_return_if_fail(FL_IS_ENGINE(self));
-
-  if (window == nullptr ||
-      !GDK_IS_X11_DISPLAY(gdk_window_get_display(window))) {
-    return;
-  }
-
-  self->xpresent_library = dlopen("libXpresent.so.1", RTLD_LAZY | RTLD_LOCAL);
-  if (self->xpresent_library == nullptr) {
-    xpresent_log("libXpresent.so.1 not available.");
-    return;
-  }
-
-  auto query_extension = reinterpret_cast<XPresentQueryExtensionFn>(
-      dlsym(self->xpresent_library, "XPresentQueryExtension"));
-  self->xpresent_select_input = reinterpret_cast<XPresentSelectInputFn>(
-      dlsym(self->xpresent_library, "XPresentSelectInput"));
-  self->xpresent_free_input = reinterpret_cast<XPresentFreeInputFn>(
-      dlsym(self->xpresent_library, "XPresentFreeInput"));
-  self->xpresent_notify_msc = reinterpret_cast<XPresentNotifyMSCFn>(
-      dlsym(self->xpresent_library, "XPresentNotifyMSC"));
-
-  if (query_extension == nullptr || self->xpresent_select_input == nullptr ||
-      self->xpresent_notify_msc == nullptr) {
-    xpresent_log("libXpresent missing required symbols.");
-    return;
-  }
-
-  self->xpresent_display =
-      gdk_x11_display_get_xdisplay(gdk_window_get_display(window));
-  self->xpresent_window = gdk_x11_window_get_xid(window);
-  int error_base = 0;
-  if (!query_extension(self->xpresent_display, &self->xpresent_event_base,
-                       &error_base)) {
-    xpresent_log("X Present extension not supported by X server.");
-    return;
-  }
-
-  self->xpresent_event_id = self->xpresent_select_input(
-      self->xpresent_display, self->xpresent_window, PresentCompleteNotifyMask);
-  self->xpresent_frame_interval_nanos =
-      get_frame_interval_nanos_for_window(window);
-  g_set_object(&self->xpresent_gdk_window, window);
-  gdk_window_add_filter(window, fl_engine_xpresent_event_filter, self);
-  self->xpresent_vsync_enabled = TRUE;
-  xpresent_log("XPresent vsync enabled.");
-}
-
 FlDisplayMonitor* fl_engine_get_display_monitor(FlEngine* self) {
   g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
   return self->display_monitor;
@@ -1070,9 +824,9 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
           [](void* user_data,
              const FlutterFrameInfo* frame_info) -> FlutterVulkanImage {
         FlEngine* engine = static_cast<FlEngine*>(user_data);
-        return fl_vulkan_manager_acquire_image(engine->vulkan_manager,
-                                               frame_info->size.width,
-                                               frame_info->size.height);
+        return fl_vulkan_manager_acquire_image(
+            engine->vulkan_manager, frame_info->size.width,
+            frame_info->size.height);
       };
       config.vulkan.present_image_callback =
           [](void* user_data, const FlutterVulkanImage* image) -> bool {
@@ -1138,9 +892,6 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
   args.platform_message_callback = fl_engine_platform_message_cb;
   args.update_semantics_callback2 = fl_engine_update_semantics_cb;
   args.custom_task_runners = &custom_task_runners;
-  if (self->xpresent_vsync_enabled) {
-    args.vsync_callback = fl_engine_xpresent_vsync_callback;
-  }
   args.shutdown_dart_vm_when_done = true;
   args.on_pre_engine_restart_callback = fl_engine_on_pre_engine_restart_cb;
   args.dart_entrypoint_argc =

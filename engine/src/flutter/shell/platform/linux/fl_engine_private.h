@@ -20,8 +20,6 @@
 
 G_BEGIN_DECLS
 
-typedef struct _GdkWindow GdkWindow;
-
 // Forward declaration for FlVulkanManager to avoid including Vulkan headers.
 typedef struct _FlVulkanManager FlVulkanManager;
 
@@ -104,15 +102,6 @@ FlVulkanManager* fl_engine_get_vulkan_manager(FlEngine* engine);
  * Sets the Vulkan manager used by this engine.
  */
 void fl_engine_set_vulkan_manager(FlEngine* engine, FlVulkanManager* manager);
-
-/**
- * fl_engine_setup_xpresent_vsync:
- * @engine: an #FlEngine.
- * @window: a realized X11 #GdkWindow.
- *
- * Sets up experimental X Present vsync callbacks for X11.
- */
-void fl_engine_setup_xpresent_vsync(FlEngine* engine, GdkWindow* window);
 
 /**
  * fl_engine_get_display_monitor:
