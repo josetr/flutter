@@ -196,7 +196,10 @@ source_set("flutter_linux_sources") {
     "//flutter/vulkan/procs",
   ]
 
-  libs = [ "wayland-client" ]
+  libs = [
+    "wayland-client",
+    "X11",
+  ]
 }
 
 source_set("flutter_linux") {
