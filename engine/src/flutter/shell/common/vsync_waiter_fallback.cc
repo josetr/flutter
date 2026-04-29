@@ -5,6 +5,7 @@
 #include "flutter/shell/common/vsync_waiter_fallback.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <memory>
 
 #include "flutter/fml/logging.h"
@@ -41,6 +42,15 @@ static fml::TimeDelta GetFrameInterval() {
   FML_LOG(WARNING) << "VsyncWaiterFallback using timer-based vsync at "
                    << refresh_rate << " Hz from " << source << " ("
                    << interval.ToMicroseconds() << " us frame interval).";
+  if (FILE* log_file = std::fopen("/home/jose/flutter-pr/vsync_fallback.log",
+                                  "a")) {
+    std::fprintf(log_file,
+                 "VsyncWaiterFallback using timer-based vsync at %.3f Hz from "
+                 "%s (%lld us frame interval)\n",
+                 refresh_rate, source,
+                 static_cast<long long>(interval.ToMicroseconds()));
+    std::fclose(log_file);
+  }
   return interval;
   }();
   return frame_interval;
