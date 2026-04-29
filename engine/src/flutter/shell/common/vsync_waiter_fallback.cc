@@ -38,9 +38,9 @@ static fml::TimeDelta GetFrameInterval() {
   }
 
   fml::TimeDelta interval = fml::TimeDelta::FromSecondsF(1.0 / refresh_rate);
-  FML_LOG(INFO) << "VsyncWaiterFallback using timer-based vsync at "
-                << refresh_rate << " Hz from " << source << " ("
-                << interval.ToMicroseconds() << " us frame interval).";
+  FML_LOG(WARNING) << "VsyncWaiterFallback using timer-based vsync at "
+                   << refresh_rate << " Hz from " << source << " ("
+                   << interval.ToMicroseconds() << " us frame interval).";
   return interval;
   }();
   return frame_interval;
