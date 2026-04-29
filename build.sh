@@ -12,6 +12,7 @@ set -euo pipefail
 #   MODE=profile ./build.sh
 #   JOBS=1 ./build.sh
 #   ENABLE_LTO=1 ./build.sh
+#   CACHE_ONLY=1 ./build.sh
 
 CHECKOUT_REF="${CHECKOUT_REF:-}"
 LOCAL_BRANCH="${LOCAL_BRANCH:-local-skia-vulkan}"
@@ -22,6 +23,7 @@ JOBS="${JOBS:-}"
 SKIP_SYNC="${SKIP_SYNC:-0}"
 ENABLE_LTO="${ENABLE_LTO:-0}"
 LOCAL_FLUTTER_VERSION="${LOCAL_FLUTTER_VERSION:-3.42.0-99.0.pre}"
+CACHE_ONLY="${CACHE_ONLY:-0}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DEPOT_TOOLS_DIR="${DEPOT_TOOLS_DIR:-${ROOT_DIR}/.depot_tools}"
@@ -147,6 +149,8 @@ build_engine() {
 setup_flutter_tool_cache() {
   cd "$ROOT_DIR"
 
+  bin/internal/update_engine_version.sh
+
   local cache_dir="${ROOT_DIR}/bin/cache"
   local out_dir="${ROOT_DIR}/engine/src/out/${BUILD_VARIANT}"
   local dart_sdk_dir="${ROOT_DIR}/engine/src/flutter/prebuilts/linux-x64/dart-sdk"
@@ -225,7 +229,11 @@ main() {
   ensure_checkout
   ensure_gclient_config
   sync_dependencies
-  build_engine
+  if [ "$CACHE_ONLY" != "1" ]; then
+    build_engine
+  else
+    log "Skipping engine build because CACHE_ONLY=1"
+  fi
   setup_flutter_tool_cache
 }
 
