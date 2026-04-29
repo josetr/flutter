@@ -240,11 +240,12 @@ static std::set<std::string> get_available_instance_extensions(
 }
 
 static bool check_device_extension(vulkan::VulkanProcTable& vk,
+                                   VkInstance instance,
                                    VkPhysicalDevice device,
                                    const char* extension_name) {
   auto enumerate_device_extension_properties =
       reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
-          vk.GetInstanceProcAddr(VK_NULL_HANDLE,
+          vk.GetInstanceProcAddr(instance,
                                  "vkEnumerateDeviceExtensionProperties"));
   if (enumerate_device_extension_properties == nullptr) {
     return false;
@@ -386,7 +387,8 @@ static VkPhysicalDevice select_physical_device(FlVulkanManager* self) {
     }
 
     // Check for swapchain extension support.
-    if (!check_device_extension(vk, device, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+    if (!check_device_extension(vk, instance, device,
+                                VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
       continue;
     }
 
@@ -698,7 +700,7 @@ static bool initialize_vulkan(FlVulkanManager* self) {
 
   // Enable optional extensions that Impeller checks for.
   if (check_device_extension(
-          *self->vk, self->physical_device,
+          *self->vk, self->instance, self->physical_device,
           VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME)) {
     self->enabled_device_extensions.push_back(
         VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
