@@ -26,6 +26,7 @@
 #include "flutter/shell/platform/linux/fl_settings_handler.h"
 #include "flutter/shell/platform/linux/fl_texture_gl_private.h"
 #include "flutter/shell/platform/linux/fl_texture_registrar_private.h"
+#include "flutter/shell/platform/linux/fl_vulkan_manager.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_plugin_registry.h"
 
 // Unique number associated with platform tasks.
@@ -53,6 +54,9 @@ struct _FlEngine {
 
   // Manages OpenGL contexts.
   FlOpenGLManager* opengl_manager;
+
+  // Manages Vulkan resources.
+  FlVulkanManager* vulkan_manager;
 
   // Messenger used to send and receive platform messages.
   FlBinaryMessenger* binary_messenger;
@@ -108,6 +112,10 @@ struct _FlEngine {
 
 G_DEFINE_QUARK(fl_engine_error_quark, fl_engine_error)
 
+// Renderer type string constants for FLUTTER_LINUX_RENDERER env var.
+static const char kRendererSoftware[] = "software";
+static const char kRendererVulkan[] = "vulkan";
+static const char kRendererOpenGL[] = "opengl";
 static void fl_engine_plugin_registry_iface_init(
     FlPluginRegistryInterface* iface);
 
@@ -583,6 +591,7 @@ static void fl_engine_dispose(GObject* object) {
   g_clear_object(&self->project);
   g_clear_object(&self->display_monitor);
   g_clear_object(&self->opengl_manager);
+  g_clear_object(&self->vulkan_manager);
   g_clear_object(&self->texture_registrar);
   g_clear_object(&self->binary_messenger);
   g_clear_object(&self->settings_handler);
@@ -659,7 +668,8 @@ static FlEngine* fl_engine_new_full(FlDartProject* project,
 
   self->project = FL_DART_PROJECT(g_object_ref(project));
   const gchar* renderer = g_getenv("FLUTTER_LINUX_RENDERER");
-  if (g_strcmp0(renderer, "software") == 0) {
+  if (renderer != nullptr &&
+      g_ascii_strcasecmp(renderer, kRendererSoftware) == 0) {
     self->renderer_type = kSoftware;
     g_warning(
         "Using the software renderer. Not all features are supported. This is "
@@ -667,8 +677,17 @@ static FlEngine* fl_engine_new_full(FlDartProject* project,
         "\n"
         "To switch back to the default renderer, unset the "
         "FLUTTER_LINUX_RENDERER environment variable.");
+  } else if (renderer != nullptr &&
+             g_ascii_strcasecmp(renderer, kRendererVulkan) == 0) {
+    if (!fl_vulkan_manager_is_available()) {
+      g_warning("Vulkan not available, defaulting to opengl");
+      self->renderer_type = kOpenGL;
+    } else {
+      self->renderer_type = kVulkan;
+    }
   } else {
-    if (renderer != nullptr && strcmp(renderer, "opengl") != 0) {
+    if (renderer != nullptr &&
+        g_ascii_strcasecmp(renderer, kRendererOpenGL) != 0) {
       g_warning("Unknown renderer type '%s', defaulting to opengl", renderer);
     }
     self->renderer_type = kOpenGL;
@@ -718,6 +737,16 @@ FlOpenGLManager* fl_engine_get_opengl_manager(FlEngine* self) {
   return self->opengl_manager;
 }
 
+FlVulkanManager* fl_engine_get_vulkan_manager(FlEngine* self) {
+  g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
+  return self->vulkan_manager;
+}
+
+void fl_engine_set_vulkan_manager(FlEngine* self, FlVulkanManager* manager) {
+  g_return_if_fail(FL_IS_ENGINE(self));
+  g_set_object(&self->vulkan_manager, manager);
+}
+
 FlDisplayMonitor* fl_engine_get_display_monitor(FlEngine* self) {
   g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
   return self->display_monitor;
@@ -750,8 +779,65 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
       config.open_gl.gl_external_texture_frame_callback =
           fl_engine_gl_external_texture_frame_callback;
       break;
+    case kVulkan: {
+      if (self->vulkan_manager == nullptr) {
+        g_set_error(error, fl_engine_error_quark(), FL_ENGINE_ERROR_FAILED,
+                    "Vulkan manager not initialized");
+        return FALSE;
+      }
+      config.vulkan.struct_size = sizeof(FlutterVulkanRendererConfig);
+      config.vulkan.version =
+          fl_vulkan_manager_get_vulkan_version(self->vulkan_manager);
+      config.vulkan.instance =
+          fl_vulkan_manager_get_instance(self->vulkan_manager);
+      config.vulkan.physical_device =
+          fl_vulkan_manager_get_physical_device(self->vulkan_manager);
+      config.vulkan.device = fl_vulkan_manager_get_device(self->vulkan_manager);
+      config.vulkan.queue_family_index =
+          fl_vulkan_manager_get_queue_family_index(self->vulkan_manager);
+      config.vulkan.queue = fl_vulkan_manager_get_queue(self->vulkan_manager);
+
+      // Get enabled extensions.
+      size_t instance_ext_count = 0;
+      const char** instance_exts =
+          fl_vulkan_manager_get_enabled_instance_extensions(
+              self->vulkan_manager, &instance_ext_count);
+      config.vulkan.enabled_instance_extension_count = instance_ext_count;
+      config.vulkan.enabled_instance_extensions = instance_exts;
+
+      size_t device_ext_count = 0;
+      const char** device_exts =
+          fl_vulkan_manager_get_enabled_device_extensions(self->vulkan_manager,
+                                                          &device_ext_count);
+      config.vulkan.enabled_device_extension_count = device_ext_count;
+      config.vulkan.enabled_device_extensions = device_exts;
+
+      config.vulkan.get_instance_proc_address_callback =
+          [](void* user_data, FlutterVulkanInstanceHandle instance,
+             const char* name) -> void* {
+        FlEngine* engine = static_cast<FlEngine*>(user_data);
+        return fl_vulkan_manager_get_instance_proc_address(
+            engine->vulkan_manager, static_cast<VkInstance>(instance), name);
+      };
+
+      config.vulkan.get_next_image_callback =
+          [](void* user_data,
+             const FlutterFrameInfo* frame_info) -> FlutterVulkanImage {
+        FlEngine* engine = static_cast<FlEngine*>(user_data);
+        return fl_vulkan_manager_acquire_image(
+            engine->vulkan_manager, frame_info->size.width,
+            frame_info->size.height);
+      };
+      config.vulkan.present_image_callback =
+          [](void* user_data, const FlutterVulkanImage* image) -> bool {
+        FlEngine* engine = static_cast<FlEngine*>(user_data);
+        return fl_vulkan_manager_present_image(
+            engine->vulkan_manager, reinterpret_cast<VkImage>(image->image),
+            static_cast<VkFormat>(image->format));
+      };
+      break;
+    }
     case kMetal:
-    case kVulkan:
     default:
       g_set_error(error, fl_engine_error_quark(), FL_ENGINE_ERROR_FAILED,
                   "Unsupported renderer type");
@@ -786,6 +872,13 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
     g_ptr_array_add(command_line_args, g_strdup(env_switch.c_str()));
   }
 
+  // Tell dart:ui that the active native renderer is Vulkan. The flag name is
+  // historical, but dart_ui.cc uses it to populate renderingBackend without
+  // enabling Impeller.
+  if (self->renderer_type == kVulkan) {
+    g_ptr_array_add(command_line_args, g_strdup("--impeller-backend=vulkan"));
+  }
+
   gchar** dart_entrypoint_args =
       fl_dart_project_get_dart_entrypoint_arguments(self->project);
 
@@ -815,7 +908,9 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
   compositor.collect_backing_store_callback =
       compositor_collect_backing_store_callback;
   compositor.present_view_callback = compositor_present_view_callback;
-  args.compositor = &compositor;
+  if (self->renderer_type != kVulkan) {
+    args.compositor = &compositor;
+  }
 
   if (self->embedder_api.RunsAOTCompiledDartCode()) {
     FlutterEngineAOTDataSource source = {};

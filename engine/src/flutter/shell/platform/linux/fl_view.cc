@@ -24,6 +24,7 @@
 #include "flutter/shell/platform/linux/fl_touch_manager.h"
 #include "flutter/shell/platform/linux/fl_view_accessible.h"
 #include "flutter/shell/platform/linux/fl_view_private.h"
+#include "flutter/shell/platform/linux/fl_vulkan_manager.h"
 #include "flutter/shell/platform/linux/fl_window_state_monitor.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_plugin_registry.h"
@@ -119,21 +120,24 @@ static gboolean redraw_cb(gpointer user_data) {
       gtk_widget_get_scale_factor(GTK_WIDGET(self->render_area));
   size_t width = allocation.width * scale_factor;
   size_t height = allocation.height * scale_factor;
-  size_t frame_width, frame_height;
-  fl_compositor_get_frame_size(self->compositor, &frame_width, &frame_height);
-  gboolean frame_size_matches = width == frame_width && height == frame_height;
-  if (self->sized_to_content && !frame_size_matches) {
-    gtk_widget_set_size_request(GTK_WIDGET(self->render_area),
-                                frame_width / scale_factor,
-                                frame_height / scale_factor);
-    GtkWidget* toplevel =
-        gtk_widget_get_toplevel(GTK_WIDGET(self->render_area));
-    if (GTK_IS_WINDOW(toplevel)) {
-      // Resize to smallest size, so that the window will shrink to fit the new
-      // size of the render area.
-      gtk_window_resize(GTK_WINDOW(toplevel), 1, 1);
+  if (self->compositor != nullptr) {
+    size_t frame_width, frame_height;
+    fl_compositor_get_frame_size(self->compositor, &frame_width, &frame_height);
+    gboolean frame_size_matches =
+        width == frame_width && height == frame_height;
+    if (self->sized_to_content && !frame_size_matches) {
+      gtk_widget_set_size_request(GTK_WIDGET(self->render_area),
+                                  frame_width / scale_factor,
+                                  frame_height / scale_factor);
+      GtkWidget* toplevel =
+          gtk_widget_get_toplevel(GTK_WIDGET(self->render_area));
+      if (GTK_IS_WINDOW(toplevel)) {
+        // Resize to smallest size, so that the window will shrink to fit the
+        // new size of the render area.
+        gtk_window_resize(GTK_WINDOW(toplevel), 1, 1);
+      }
+      return G_SOURCE_REMOVE;
     }
-    return FALSE;
   }
 
   gtk_widget_queue_draw(GTK_WIDGET(self->render_area));
@@ -239,6 +243,19 @@ static void handle_geometry_changed(FlView* self) {
       self->engine, display_id, self->view_id, min_width * scale_factor,
       min_height * scale_factor, max_width * scale_factor,
       max_height * scale_factor, scale_factor);
+
+  if (fl_engine_get_renderer_type(self->engine) == kVulkan) {
+    FlVulkanManager* vulkan_manager =
+        fl_engine_get_vulkan_manager(self->engine);
+    if (vulkan_manager != nullptr) {
+      GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(self));
+      gint content_x = 0, content_y = 0;
+      gtk_widget_translate_coordinates(GTK_WIDGET(self->render_area), toplevel,
+                                       0, 0, &content_x, &content_y);
+      fl_vulkan_manager_set_subsurface_position(vulkan_manager, content_x,
+                                                content_y);
+    }
+  }
 }
 
 static void view_added_cb(GObject* object,
@@ -283,7 +300,9 @@ static void fl_view_present_layers(FlRenderable* renderable,
                                    size_t layers_count) {
   FlView* self = FL_VIEW(renderable);
 
-  fl_compositor_present_layers(self->compositor, layers, layers_count);
+  if (self->compositor != nullptr) {
+    fl_compositor_present_layers(self->compositor, layers, layers_count);
+  }
 
   // Perform the redraw in the GTK thead.
   g_idle_add(redraw_cb, self);
@@ -494,6 +513,32 @@ static void setup_software(FlView* self) {
       fl_compositor_software_new(fl_engine_get_task_runner(self->engine)));
 }
 
+static void setup_vulkan(FlView* self) {
+  GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(self));
+  GdkWindow* window = gtk_widget_get_window(toplevel);
+  if (window == nullptr) {
+    g_warning("No GdkWindow available for Vulkan, falling back to software");
+    setup_software(self);
+    return;
+  }
+
+  FlVulkanManager* vulkan_manager = fl_vulkan_manager_new(window);
+  if (vulkan_manager == nullptr) {
+    g_warning("Vulkan manager creation failed, falling back to software");
+    setup_software(self);
+    return;
+  }
+
+  gint content_x = 0, content_y = 0;
+  gtk_widget_translate_coordinates(GTK_WIDGET(self->render_area), toplevel, 0,
+                                   0, &content_x, &content_y);
+  fl_vulkan_manager_set_subsurface_position(vulkan_manager, content_x,
+                                            content_y);
+
+  fl_engine_set_vulkan_manager(self->engine, vulkan_manager);
+  g_object_unref(vulkan_manager);
+}
+
 static void realize_cb(FlView* self) {
   switch (fl_engine_get_renderer_type(self->engine)) {
     case kOpenGL:
@@ -501,6 +546,9 @@ static void realize_cb(FlView* self) {
       break;
     case kSoftware:
       setup_software(self);
+      break;
+    case kVulkan:
+      setup_vulkan(self);
       break;
     default:
       break;
@@ -522,8 +570,10 @@ static void realize_cb(FlView* self) {
                            G_CALLBACK(window_delete_event_cb), self);
 
   // Flutter engine will need to make the context current from raster thread
-  // during initialization.
-  fl_opengl_manager_clear_current(fl_engine_get_opengl_manager(self->engine));
+  // during OpenGL initialization.
+  if (fl_engine_get_renderer_type(self->engine) != kVulkan) {
+    fl_opengl_manager_clear_current(fl_engine_get_opengl_manager(self->engine));
+  }
 
   g_autoptr(GError) error = nullptr;
   if (!fl_engine_start(self->engine, &error)) {
@@ -534,6 +584,10 @@ static void realize_cb(FlView* self) {
   setup_cursor(self);
 
   handle_geometry_changed(self);
+
+  if (fl_engine_get_renderer_type(self->engine) == kVulkan) {
+    g_idle_add(redraw_cb, self);
+  }
 }
 
 static void size_allocate_cb(FlView* self) {
@@ -557,6 +611,13 @@ static gboolean draw_cb(FlView* self, cairo_t* cr) {
 
   if (self->render_context) {
     gdk_gl_context_make_current(self->render_context);
+  }
+
+  if (self->compositor == nullptr) {
+    if (self->render_context) {
+      gdk_gl_context_clear_current();
+    }
+    return TRUE;
   }
 
   gboolean wait_for_frame = !self->sized_to_content;
@@ -594,6 +655,12 @@ static void fl_view_dispose(GObject* object) {
     if (self->cursor_changed_cb_id != 0) {
       g_signal_handler_disconnect(handler, self->cursor_changed_cb_id);
       self->cursor_changed_cb_id = 0;
+    }
+
+    FlVulkanManager* vulkan_manager =
+        fl_engine_get_vulkan_manager(self->engine);
+    if (vulkan_manager != nullptr) {
+      fl_vulkan_manager_shutdown(vulkan_manager);
     }
 
     // Release the view ID from the engine.

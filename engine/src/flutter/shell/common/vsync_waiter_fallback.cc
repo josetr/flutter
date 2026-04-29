@@ -4,6 +4,7 @@
 
 #include "flutter/shell/common/vsync_waiter_fallback.h"
 
+#include <cstdlib>
 #include <memory>
 
 #include "flutter/fml/logging.h"
@@ -12,6 +13,29 @@
 
 namespace flutter {
 namespace {
+
+static fml::TimeDelta GetFrameInterval() {
+  constexpr double kDefaultRefreshRate = 60.0;
+  constexpr double kMinRefreshRate = 1.0;
+  constexpr double kMaxRefreshRate = 1000.0;
+
+  double refresh_rate = kDefaultRefreshRate;
+  const char* refresh_rate_value =
+      std::getenv("FLUTTER_ENGINE_FALLBACK_VSYNC_HZ");
+  if (refresh_rate_value != nullptr && refresh_rate_value[0] != '\0') {
+    char* end = nullptr;
+    double parsed_refresh_rate = std::strtod(refresh_rate_value, &end);
+    if (end != refresh_rate_value && parsed_refresh_rate >= kMinRefreshRate &&
+        parsed_refresh_rate <= kMaxRefreshRate) {
+      refresh_rate = parsed_refresh_rate;
+    } else {
+      FML_LOG(WARNING) << "Ignoring invalid FLUTTER_ENGINE_FALLBACK_VSYNC_HZ="
+                       << refresh_rate_value;
+    }
+  }
+
+  return fml::TimeDelta::FromSecondsF(1.0 / refresh_rate);
+}
 
 static fml::TimePoint SnapToNextTick(fml::TimePoint value,
                                      fml::TimePoint tick_phase,
@@ -35,8 +59,7 @@ VsyncWaiterFallback::~VsyncWaiterFallback() = default;
 
 // |VsyncWaiter|
 void VsyncWaiterFallback::AwaitVSync() {
-  constexpr fml::TimeDelta kSingleFrameInterval =
-      fml::TimeDelta::FromSecondsF(1.0 / 60.0);
+  const fml::TimeDelta kSingleFrameInterval = GetFrameInterval();
   auto frame_start_time =
       SnapToNextTick(fml::TimePoint::Now(), phase_, kSingleFrameInterval);
   auto frame_target_time = frame_start_time + kSingleFrameInterval;

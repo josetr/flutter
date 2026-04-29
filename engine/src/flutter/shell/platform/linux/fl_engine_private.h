@@ -20,6 +20,9 @@
 
 G_BEGIN_DECLS
 
+// Forward declaration for FlVulkanManager to avoid including Vulkan headers.
+typedef struct _FlVulkanManager FlVulkanManager;
+
 /**
  * FlEngineError:
  * Errors for #FlEngine objects to set on failures.
@@ -80,6 +83,25 @@ FlutterRendererType fl_engine_get_renderer_type(FlEngine* engine);
  * Returns: an #FlOpenGLManager.
  */
 FlOpenGLManager* fl_engine_get_opengl_manager(FlEngine* engine);
+
+/**
+ * fl_engine_get_vulkan_manager:
+ * @engine: an #FlEngine.
+ *
+ * Gets the Vulkan manager used by this engine.
+ *
+ * Returns: an #FlVulkanManager.
+ */
+FlVulkanManager* fl_engine_get_vulkan_manager(FlEngine* engine);
+
+/**
+ * fl_engine_set_vulkan_manager:
+ * @engine: an #FlEngine.
+ * @manager: an #FlVulkanManager or %NULL.
+ *
+ * Sets the Vulkan manager used by this engine.
+ */
+void fl_engine_set_vulkan_manager(FlEngine* engine, FlVulkanManager* manager);
 
 /**
  * fl_engine_get_display_monitor:
