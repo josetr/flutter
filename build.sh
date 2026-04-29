@@ -37,7 +37,7 @@ configure_build_mode() {
     BUILD_VARIANT="${BUILD_VARIANT:-host_release}"
     GN_ARGS="${GN_ARGS:---runtime-mode=release}"
     if [ -z "$JOBS" ] && [[ "$BUILD_VARIANT" == *release* ]]; then
-      JOBS=2
+      JOBS=12
     fi
     return
   fi
@@ -50,7 +50,7 @@ configure_build_mode() {
         GN_ARGS="${GN_ARGS} --no-lto"
       fi
       if [ -z "$JOBS" ]; then
-        JOBS=2
+        JOBS=12
       fi
       ;;
     profile)
