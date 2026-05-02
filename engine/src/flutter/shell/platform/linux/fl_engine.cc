@@ -824,9 +824,9 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
           [](void* user_data,
              const FlutterFrameInfo* frame_info) -> FlutterVulkanImage {
         FlEngine* engine = static_cast<FlEngine*>(user_data);
-        return fl_vulkan_manager_acquire_image(
-            engine->vulkan_manager, frame_info->size.width,
-            frame_info->size.height);
+        return fl_vulkan_manager_acquire_image(engine->vulkan_manager,
+                                               frame_info->size.width,
+                                               frame_info->size.height);
       };
       config.vulkan.present_image_callback =
           [](void* user_data, const FlutterVulkanImage* image) -> bool {

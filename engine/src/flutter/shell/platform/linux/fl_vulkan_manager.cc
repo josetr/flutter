@@ -294,10 +294,8 @@ static bool load_instance_wsi_procs(FlVulkanManager* self) {
       self->vk->GetInstanceProcAddr(self->instance, "vkDestroySurfaceKHR"));
 
 #ifdef GDK_WINDOWING_X11
-  self->create_xlib_surface_khr =
-      reinterpret_cast<PFN_vkCreateXlibSurfaceKHR>(
-          self->vk->GetInstanceProcAddr(self->instance,
-                                        "vkCreateXlibSurfaceKHR"));
+  self->create_xlib_surface_khr = reinterpret_cast<PFN_vkCreateXlibSurfaceKHR>(
+      self->vk->GetInstanceProcAddr(self->instance, "vkCreateXlibSurfaceKHR"));
 #endif
 
 #ifdef GDK_WINDOWING_WAYLAND
@@ -316,9 +314,8 @@ static bool load_instance_wsi_procs(FlVulkanManager* self) {
 
 static bool load_device_wsi_procs(FlVulkanManager* self) {
   vulkan::VulkanHandle<VkDevice> device_handle(self->device, nullptr);
-  self->acquire_next_image_khr =
-      reinterpret_cast<PFN_vkAcquireNextImageKHR>(
-          self->vk->AcquireProc("vkAcquireNextImageKHR", device_handle));
+  self->acquire_next_image_khr = reinterpret_cast<PFN_vkAcquireNextImageKHR>(
+      self->vk->AcquireProc("vkAcquireNextImageKHR", device_handle));
   self->create_swapchain_khr = reinterpret_cast<PFN_vkCreateSwapchainKHR>(
       self->vk->AcquireProc("vkCreateSwapchainKHR", device_handle));
   self->destroy_swapchain_khr = reinterpret_cast<PFN_vkDestroySwapchainKHR>(

@@ -4,8 +4,8 @@
 
 #include "flutter/shell/common/vsync_waiter_fallback.h"
 
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 
 #include "flutter/fml/logging.h"
@@ -17,41 +17,42 @@ namespace {
 
 static fml::TimeDelta GetFrameInterval() {
   static const fml::TimeDelta frame_interval = [] {
-  constexpr double kDefaultRefreshRate = 60.0;
-  constexpr double kMinRefreshRate = 1.0;
-  constexpr double kMaxRefreshRate = 1000.0;
+    constexpr double kDefaultRefreshRate = 60.0;
+    constexpr double kMinRefreshRate = 1.0;
+    constexpr double kMaxRefreshRate = 1000.0;
 
-  double refresh_rate = kDefaultRefreshRate;
-  const char* source = "default";
-  const char* refresh_rate_value =
-      std::getenv("FLUTTER_ENGINE_FALLBACK_VSYNC_HZ");
-  if (refresh_rate_value != nullptr && refresh_rate_value[0] != '\0') {
-    char* end = nullptr;
-    double parsed_refresh_rate = std::strtod(refresh_rate_value, &end);
-    if (end != refresh_rate_value && parsed_refresh_rate >= kMinRefreshRate &&
-        parsed_refresh_rate <= kMaxRefreshRate) {
-      refresh_rate = parsed_refresh_rate;
-      source = "FLUTTER_ENGINE_FALLBACK_VSYNC_HZ";
-    } else {
-      FML_LOG(WARNING) << "Ignoring invalid FLUTTER_ENGINE_FALLBACK_VSYNC_HZ="
-                       << refresh_rate_value;
+    double refresh_rate = kDefaultRefreshRate;
+    const char* source = "default";
+    const char* refresh_rate_value =
+        std::getenv("FLUTTER_ENGINE_FALLBACK_VSYNC_HZ");
+    if (refresh_rate_value != nullptr && refresh_rate_value[0] != '\0') {
+      char* end = nullptr;
+      double parsed_refresh_rate = std::strtod(refresh_rate_value, &end);
+      if (end != refresh_rate_value && parsed_refresh_rate >= kMinRefreshRate &&
+          parsed_refresh_rate <= kMaxRefreshRate) {
+        refresh_rate = parsed_refresh_rate;
+        source = "FLUTTER_ENGINE_FALLBACK_VSYNC_HZ";
+      } else {
+        FML_LOG(WARNING) << "Ignoring invalid FLUTTER_ENGINE_FALLBACK_VSYNC_HZ="
+                         << refresh_rate_value;
+      }
     }
-  }
 
-  fml::TimeDelta interval = fml::TimeDelta::FromSecondsF(1.0 / refresh_rate);
-  FML_LOG(WARNING) << "VsyncWaiterFallback using timer-based vsync at "
-                   << refresh_rate << " Hz from " << source << " ("
-                   << interval.ToMicroseconds() << " us frame interval).";
-  if (FILE* log_file = std::fopen("/home/jose/flutter-pr/vsync_fallback.log",
-                                  "a")) {
-    std::fprintf(log_file,
-                 "VsyncWaiterFallback using timer-based vsync at %.3f Hz from "
-                 "%s (%lld us frame interval)\n",
-                 refresh_rate, source,
-                 static_cast<long long>(interval.ToMicroseconds()));
-    std::fclose(log_file);
-  }
-  return interval;
+    fml::TimeDelta interval = fml::TimeDelta::FromSecondsF(1.0 / refresh_rate);
+    FML_LOG(WARNING) << "VsyncWaiterFallback using timer-based vsync at "
+                     << refresh_rate << " Hz from " << source << " ("
+                     << interval.ToMicroseconds() << " us frame interval).";
+    if (FILE* log_file =
+            std::fopen("/home/jose/flutter-pr/vsync_fallback.log", "a")) {
+      std::fprintf(
+          log_file,
+          "VsyncWaiterFallback using timer-based vsync at %.3f Hz from "
+          "%s (%lld us frame interval)\n",
+          refresh_rate, source,
+          static_cast<long long>(interval.ToMicroseconds()));
+      std::fclose(log_file);
+    }
+    return interval;
   }();
   return frame_interval;
 }
