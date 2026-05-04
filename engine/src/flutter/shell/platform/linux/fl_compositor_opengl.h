@@ -42,6 +42,29 @@ FlCompositorOpenGL* fl_compositor_opengl_new(FlTaskRunner* task_runner,
                                              FlOpenGLManager* opengl_manager,
                                              gboolean shareable);
 
+/**
+ * fl_compositor_opengl_set_present_drawable:
+ * @compositor: an #FlCompositorOpenGL.
+ * @drawable: native OpenGL drawable to present into.
+ * @width: drawable width in physical pixels.
+ * @height: drawable height in physical pixels.
+ *
+ * Sets a native OpenGL presentation drawable.
+ */
+void fl_compositor_opengl_set_present_drawable(FlCompositorOpenGL* compositor,
+                                               FlOpenGLDrawable drawable,
+                                               size_t width,
+                                               size_t height);
+
+/**
+ * fl_compositor_opengl_disable_present_drawable:
+ * @compositor: an #FlCompositorOpenGL.
+ *
+ * Disables direct native OpenGL presentation.
+ */
+void fl_compositor_opengl_disable_present_drawable(
+    FlCompositorOpenGL* compositor);
+
 G_END_DECLS
 
 #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_COMPOSITOR_OPENGL_H_

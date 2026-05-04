@@ -6,6 +6,9 @@
 
 #include <atk/atk.h>
 #include <gdk/gdkwayland.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#endif
 #include <gtk/gtk-a11y.h>
 
 #include <cstring>
@@ -45,6 +48,9 @@ struct _FlView {
 
   // Combines layers into frame.
   FlCompositor* compositor;
+
+  // TRUE when OpenGL frames are presented directly to the X11 render area.
+  gboolean glx_present_drawable_enabled;
 
   // Signal subscription for engine restart signal.
   guint on_pre_engine_restart_cb_id;
@@ -102,6 +108,65 @@ G_DEFINE_TYPE_WITH_CODE(
         G_IMPLEMENT_INTERFACE(fl_plugin_registry_get_type(),
                               fl_view_plugin_registry_iface_init))
 
+#ifdef GDK_WINDOWING_X11
+static void update_glx_present_drawable(FlView* self) {
+  if (!self->glx_present_drawable_enabled ||
+      !FL_IS_COMPOSITOR_OPENGL(self->compositor)) {
+    return;
+  }
+
+  GdkWindow* window = gtk_widget_get_window(GTK_WIDGET(self->render_area));
+  if (window == nullptr || !GDK_IS_X11_WINDOW(window)) {
+    fl_compositor_opengl_disable_present_drawable(
+        FL_COMPOSITOR_OPENGL(self->compositor));
+    return;
+  }
+
+  GtkAllocation allocation;
+  gtk_widget_get_allocation(GTK_WIDGET(self->render_area), &allocation);
+  gint scale_factor =
+      gtk_widget_get_scale_factor(GTK_WIDGET(self->render_area));
+  size_t width = allocation.width * scale_factor;
+  size_t height = allocation.height * scale_factor;
+  FlOpenGLDrawable drawable =
+      static_cast<FlOpenGLDrawable>(gdk_x11_window_get_xid(window));
+  fl_compositor_opengl_set_present_drawable(
+      FL_COMPOSITOR_OPENGL(self->compositor), drawable, width, height);
+}
+
+static gboolean configure_glx_render_area(FlView* self) {
+  GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(self));
+  if (!GDK_IS_X11_DISPLAY(display)) {
+    return FALSE;
+  }
+
+  FlOpenGLManager* opengl_manager =
+      fl_engine_get_opengl_manager(self->engine);
+  if (!fl_opengl_manager_try_enable_glx(opengl_manager, display)) {
+    return FALSE;
+  }
+
+  gulong visual_id = fl_opengl_manager_get_glx_visual_id(opengl_manager);
+  if (visual_id == 0) {
+    fl_opengl_manager_disable_glx(opengl_manager);
+    return FALSE;
+  }
+
+  GdkScreen* screen = gtk_widget_get_screen(GTK_WIDGET(self));
+  GdkVisual* visual = gdk_x11_screen_lookup_visual(screen, visual_id);
+  if (visual == nullptr) {
+    g_warning("Failed to find GDK visual for GLX visual");
+    fl_opengl_manager_disable_glx(opengl_manager);
+    return FALSE;
+  }
+
+  gtk_widget_set_visual(GTK_WIDGET(self->render_area), visual);
+  gtk_widget_set_app_paintable(GTK_WIDGET(self->render_area), TRUE);
+  self->glx_present_drawable_enabled = TRUE;
+  return TRUE;
+}
+#endif
+
 // Redraw the view from the GTK thread.
 static gboolean redraw_cb(gpointer user_data) {
   FlView* self = FL_VIEW(user_data);
@@ -136,7 +201,9 @@ static gboolean redraw_cb(gpointer user_data) {
     return FALSE;
   }
 
-  gtk_widget_queue_draw(GTK_WIDGET(self->render_area));
+  if (!self->glx_present_drawable_enabled) {
+    gtk_widget_queue_draw(GTK_WIDGET(self->render_area));
+  }
 
   return FALSE;
 }
@@ -283,9 +350,14 @@ static void fl_view_present_layers(FlRenderable* renderable,
                                    size_t layers_count) {
   FlView* self = FL_VIEW(renderable);
 
-  fl_compositor_present_layers(self->compositor, layers, layers_count);
+  gboolean presented =
+      fl_compositor_present_layers(self->compositor, layers, layers_count);
+#ifdef GDK_WINDOWING_X11
+  if (!presented && self->glx_present_drawable_enabled) {
+    g_warning("Flutter Linux: direct GLX drawable presentation failed");
+  }
+#endif
 
-  // Perform the redraw in the GTK thead.
   g_idle_add(redraw_cb, self);
 }
 
@@ -467,8 +539,27 @@ static void gesture_zoom_end_cb(FlView* self) {
 static void setup_opengl(FlView* self) {
   g_autoptr(GError) error = nullptr;
 
-  self->render_context = gdk_window_create_gl_context(
-      gtk_widget_get_window(GTK_WIDGET(self->render_area)), &error);
+  GdkWindow* window = gtk_widget_get_window(GTK_WIDGET(self->render_area));
+  GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(self));
+  FlOpenGLManager* opengl_manager = fl_engine_get_opengl_manager(self->engine);
+
+#ifdef GDK_WINDOWING_X11
+  if (self->glx_present_drawable_enabled && GDK_IS_X11_WINDOW(window)) {
+    FlCompositorOpenGL* compositor = fl_compositor_opengl_new(
+        fl_engine_get_task_runner(self->engine), opengl_manager, FALSE);
+    self->compositor = FL_COMPOSITOR(compositor);
+    update_glx_present_drawable(self);
+    return;
+  }
+
+  if (self->glx_present_drawable_enabled) {
+    g_warning("Falling back to GTK OpenGL presentation");
+    self->glx_present_drawable_enabled = FALSE;
+    fl_opengl_manager_disable_glx(opengl_manager);
+  }
+#endif
+
+  self->render_context = gdk_window_create_gl_context(window, &error);
   if (self->render_context == nullptr) {
     g_warning("Failed to create OpenGL context: %s", error->message);
     return;
@@ -482,11 +573,9 @@ static void setup_opengl(FlView* self) {
   // If using Wayland, then EGL is in use and we can access the frame
   // from the Flutter context using EGLImage. If not (i.e. X11 using GLX)
   // then we have to copy the texture via the CPU.
-  gboolean shareable =
-      GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
+  gboolean shareable = GDK_IS_WAYLAND_DISPLAY(display);
   self->compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
-      fl_engine_get_task_runner(self->engine),
-      fl_engine_get_opengl_manager(self->engine), shareable));
+      fl_engine_get_task_runner(self->engine), opengl_manager, shareable));
 }
 
 static void setup_software(FlView* self) {
@@ -504,6 +593,10 @@ static void realize_cb(FlView* self) {
       break;
     default:
       break;
+  }
+  if (self->compositor == nullptr) {
+    g_warning("Failed to setup Flutter compositor");
+    return;
   }
 
   if (self->view_id != flutter::kFlutterImplicitViewId) {
@@ -537,6 +630,9 @@ static void realize_cb(FlView* self) {
 }
 
 static void size_allocate_cb(FlView* self) {
+#ifdef GDK_WINDOWING_X11
+  update_glx_present_drawable(self);
+#endif
   handle_geometry_changed(self);
 }
 
@@ -553,6 +649,10 @@ static void paint_background(FlView* self, cairo_t* cr) {
 }
 
 static gboolean draw_cb(FlView* self, cairo_t* cr) {
+  if (self->glx_present_drawable_enabled) {
+    return TRUE;
+  }
+
   paint_background(self, cr);
 
   if (self->render_context) {
@@ -716,6 +816,10 @@ static void fl_view_class_init(FlViewClass* klass) {
 
 // Engine related construction.
 static void setup_engine(FlView* self) {
+#ifdef GDK_WINDOWING_X11
+  configure_glx_render_area(self);
+#endif
+
   self->view_accessible = fl_view_accessible_new(self->engine, self->view_id);
   fl_socket_accessible_embed(
       FL_SOCKET_ACCESSIBLE(gtk_widget_get_accessible(GTK_WIDGET(self))),

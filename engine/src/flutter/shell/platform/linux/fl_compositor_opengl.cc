@@ -50,6 +50,13 @@ struct _FlCompositorOpenGL {
   // Flutter OpenGL contexts.
   FlOpenGLManager* opengl_manager;
 
+  // Native GLX drawable to present into.
+  FlOpenGLDrawable present_drawable;
+
+  // Current presentation drawable size in physical pixels.
+  size_t present_drawable_width;
+  size_t present_drawable_height;
+
   // Last rendered frame.
   FlFramebuffer* framebuffer;
 
@@ -203,6 +210,10 @@ static void composite_layer(FlCompositorOpenGL* self,
   glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
+static gboolean present_to_glx_drawable(FlCompositorOpenGL* self,
+                                    size_t width,
+                                    size_t height);
+
 static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
                                                     const FlutterLayer** layers,
                                                     size_t layers_count) {
@@ -256,7 +267,7 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
         fl_framebuffer_new(general_format, width, height, self->shareable);
 
     // If not shareable make buffer to copy frame pixels into.
-    if (!self->shareable) {
+    if (!self->shareable && self->present_drawable == 0) {
       size_t data_length = width * height * 4;
       self->pixels = static_cast<uint8_t*>(realloc(self->pixels, data_length));
     }
@@ -346,7 +357,10 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
   glBlendFuncSeparate(saved_src_rgb, saved_dst_rgb, saved_src_alpha,
                       saved_dst_alpha);
 
-  if (!self->shareable) {
+  gboolean result = TRUE;
+  if (self->present_drawable != 0) {
+    result = present_to_glx_drawable(self, width, height);
+  } else if (!self->shareable) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER,
                       fl_framebuffer_get_id(self->framebuffer));
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, self->pixels);
@@ -358,7 +372,7 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
 
   fl_task_runner_stop_wait(self->task_runner);
 
-  return TRUE;
+  return result;
 }
 
 static void fl_compositor_opengl_get_frame_size(FlCompositor* compositor,
@@ -385,6 +399,10 @@ static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
                                             GdkWindow* window,
                                             gboolean wait_for_frame) {
   FlCompositorOpenGL* self = FL_COMPOSITOR_OPENGL(compositor);
+
+  if (self->present_drawable != 0) {
+    return TRUE;
+  }
 
   g_mutex_lock(&self->frame_mutex);
   if (self->framebuffer == nullptr) {
@@ -452,6 +470,61 @@ static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
   return TRUE;
 }
 
+static gboolean present_to_glx_drawable(FlCompositorOpenGL* self,
+                                    size_t width,
+                                    size_t height) {
+  if (width != self->present_drawable_width ||
+      height != self->present_drawable_height) {
+    return TRUE;
+  }
+
+  if (!fl_opengl_manager_make_current_with_drawable(self->opengl_manager,
+                                                    self->present_drawable)) {
+    g_warning("Failed to make OpenGL presentation drawable current");
+    return FALSE;
+  }
+
+  GLint saved_viewport[4];
+  glGetIntegerv(GL_VIEWPORT, saved_viewport);
+  GLint saved_draw_framebuffer_binding;
+  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_draw_framebuffer_binding);
+  GLint saved_read_framebuffer_binding;
+  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved_read_framebuffer_binding);
+
+  glBindFramebuffer(GL_READ_FRAMEBUFFER,
+                    fl_framebuffer_get_id(self->framebuffer));
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+  glBlitFramebuffer(0, 0, static_cast<GLint>(width), static_cast<GLint>(height),
+                    0, 0, static_cast<GLint>(width), static_cast<GLint>(height),
+                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+  GLenum error = glGetError();
+  if (error != GL_NO_ERROR) {
+    g_warning("OpenGL drawable presentation failed with GL error 0x%x", error);
+  }
+
+  gboolean swapped = TRUE;
+  if (!fl_opengl_manager_swap_buffers(self->opengl_manager,
+                                      self->present_drawable)) {
+    g_warning("Failed to swap OpenGL presentation drawable buffers");
+    swapped = FALSE;
+  }
+
+  glViewport(saved_viewport[0], saved_viewport[1], saved_viewport[2],
+             saved_viewport[3]);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved_draw_framebuffer_binding);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, saved_read_framebuffer_binding);
+
+  gboolean restored = TRUE;
+  if (!fl_opengl_manager_make_current(self->opengl_manager)) {
+    g_warning("Failed to restore OpenGL render context current");
+    restored = FALSE;
+  }
+
+  return error == GL_NO_ERROR && swapped && restored;
+}
+
 static void fl_compositor_opengl_dispose(GObject* object) {
   FlCompositorOpenGL* self = FL_COMPOSITOR_OPENGL(object);
 
@@ -493,4 +566,21 @@ FlCompositorOpenGL* fl_compositor_opengl_new(FlTaskRunner* task_runner,
   setup_shader(self);
 
   return self;
+}
+
+void fl_compositor_opengl_set_present_drawable(FlCompositorOpenGL* self,
+                                               FlOpenGLDrawable drawable,
+                                               size_t width,
+                                               size_t height) {
+  g_return_if_fail(FL_IS_COMPOSITOR_OPENGL(self));
+  self->present_drawable = drawable;
+  self->present_drawable_width = width;
+  self->present_drawable_height = height;
+}
+
+void fl_compositor_opengl_disable_present_drawable(FlCompositorOpenGL* self) {
+  g_return_if_fail(FL_IS_COMPOSITOR_OPENGL(self));
+  self->present_drawable = 0;
+  self->present_drawable_width = 0;
+  self->present_drawable_height = 0;
 }

@@ -104,7 +104,10 @@ source_set("flutter_linux_sources") {
              "key_mapping.h",
            ]
 
-  configs += [ "//flutter/shell/platform/linux/config:gtk" ]
+  configs += [
+    "//flutter/shell/platform/linux/config:gtk",
+    "//flutter/shell/platform/linux/config:x11",
+  ]
 
   public_configs = [ ":disable_warnings" ]
 
@@ -172,6 +175,7 @@ source_set("flutter_linux_sources") {
     "fl_view_accessible.cc",
     "fl_window_monitor.cc",
     "fl_window_state_monitor.cc",
+    "fl_x11_threading.cc",
     "key_mapping.g.cc",
   ]
 
